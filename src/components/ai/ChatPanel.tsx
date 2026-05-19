@@ -11,6 +11,7 @@ import { ChatInput } from './ChatInput';
 import { runAgent } from '../../lib/ai/agent';
 import { getToolDefinitions, getToolExecutors } from '../../lib/ai/tools';
 import { SYSTEM_PROMPT } from '../../lib/ai/prompts';
+import { abortActiveRequest } from '../../lib/ai/client';
 
 export function ChatPanel() {
   const { isOpen, setOpen, messages, isStreaming, setStreaming, addMessage, appendToLast, updateLastMessage, clearMessages } = useChatStore();
@@ -60,10 +61,8 @@ export function ChatPanel() {
               appendToLast(event.content);
               break;
             case 'tool_start':
-              // Update the last message to show tool is running
-              updateLastMessage({
-                content: `正在调用工具: ${event.name}...`,
-              });
+              // Append tool status to current message, don't overwrite existing content
+              appendToLast(`\n\n> 调用工具: ${event.name}...`);
               break;
             case 'tool_result':
               // Add tool result as a separate message
@@ -76,9 +75,28 @@ export function ChatPanel() {
               addMessage({ role: 'assistant', content: '', isStreaming: true });
               break;
             case 'done':
-              updateLastMessage({ isStreaming: false });
+              // Mark ALL streaming messages as done (not just the last one)
+              useChatStore.getState().messages.forEach((msg, i) => {
+                if (msg.isStreaming) {
+                  useChatStore.setState((s) => {
+                    const msgs = [...s.messages];
+                    msgs[i] = { ...msgs[i], isStreaming: false };
+                    return { messages: msgs };
+                  });
+                }
+              });
               break;
             case 'error':
+              // Mark all streaming messages as done and show error on last
+              useChatStore.getState().messages.forEach((msg, i) => {
+                if (msg.isStreaming) {
+                  useChatStore.setState((s) => {
+                    const msgs = [...s.messages];
+                    msgs[i] = { ...msgs[i], isStreaming: false };
+                    return { messages: msgs };
+                  });
+                }
+              });
               updateLastMessage({
                 content: `错误: ${event.error}`,
                 isStreaming: false,
@@ -118,7 +136,12 @@ export function ChatPanel() {
             <div className="flex items-center justify-between">
               <SheetTitle className="text-base">AI 分析助手</SheetTitle>
               <div className="flex gap-2">
-                {messages.length > 0 && (
+                {isStreaming && (
+                  <Button variant="destructive" size="sm" onClick={() => abortActiveRequest()}>
+                    停止
+                  </Button>
+                )}
+                {messages.length > 0 && !isStreaming && (
                   <Button variant="ghost" size="sm" onClick={clearMessages}>
                     清空
                   </Button>

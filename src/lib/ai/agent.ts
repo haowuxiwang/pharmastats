@@ -93,18 +93,31 @@ export async function* runAgent(
     });
 
     for (const tc of toolCalls) {
-      const executor = toolExecutors.find((e) => e.name === tc.function.name);
+      // Defensive: validate tool call structure
+      if (!tc.function?.name) {
+        const errResult = JSON.stringify({ error: 'Malformed tool call: missing function name' });
+        messages.push({ role: 'tool', content: errResult, tool_call_id: tc.id || 'unknown', name: 'unknown' });
+        yield { type: 'tool_result', name: 'unknown', result: errResult };
+        continue;
+      }
+
+      const toolName = tc.function.name;
+      const toolCallId = tc.id || `call_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+      const executor = toolExecutors.find((e) => e.name === toolName);
 
       yield {
         type: 'tool_start',
-        name: tc.function.name,
+        name: toolName,
         args: tc.function.arguments,
       };
 
       let resultStr: string;
       if (executor) {
         try {
-          const args = JSON.parse(tc.function.arguments);
+          const parsed = JSON.parse(tc.function.arguments);
+          const args = typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+            ? parsed
+            : {};
           const result = await executor.execute(args, data);
           resultStr = JSON.stringify(result, null, 2);
         } catch (err) {
@@ -113,21 +126,20 @@ export async function* runAgent(
           });
         }
       } else {
-        resultStr = JSON.stringify({ error: `Unknown tool: ${tc.function.name}` });
+        resultStr = JSON.stringify({ error: `Unknown tool: ${toolName}` });
       }
 
       yield {
         type: 'tool_result',
-        name: tc.function.name,
+        name: toolName,
         result: resultStr,
       };
 
-      // Add tool result to messages
       messages.push({
         role: 'tool',
         content: resultStr,
-        tool_call_id: tc.id,
-        name: tc.function.name,
+        tool_call_id: toolCallId,
+        name: toolName,
       });
     }
 

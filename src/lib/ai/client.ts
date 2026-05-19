@@ -1,5 +1,6 @@
 /**
  * AI Client - LLM API integration with OpenAI-compatible tool calling + SSE streaming.
+ * Features: AbortController, configurable timeout, retry for transient errors.
  */
 
 import type { AIConfig } from '../../types';
@@ -58,9 +59,30 @@ const PROVIDER_CONFIGS: Record<string, { baseUrl: string; model: string }> = {
   openai: { baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
 };
 
+const DEFAULT_TIMEOUT_MS = 60_000;
+const MAX_RETRIES = 3;
+const RETRYABLE_STATUS = new Set([429, 502, 503, 504]);
+
 export function getProviderConfig(provider: string) {
   return PROVIDER_CONFIGS[provider] || PROVIDER_CONFIGS.deepseek;
 }
+
+// ── Abort control ──────────────────────────────────────────────────────────
+
+let activeController: AbortController | null = null;
+
+/** Abort the currently active streaming request. */
+export function abortActiveRequest() {
+  activeController?.abort();
+  activeController = null;
+}
+
+/** Check if the current request was aborted. */
+export function isAborted(): boolean {
+  return activeController?.signal.aborted ?? false;
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
 
 function buildBody(options: ChatCompletionOptions, model: string): Record<string, unknown> {
   const body: Record<string, unknown> = {
@@ -76,7 +98,19 @@ function buildBody(options: ChatCompletionOptions, model: string): Record<string
   return body;
 }
 
-/** Non-streaming completion */
+function getRetryAfterMs(response: Response): number | null {
+  const header = response.headers.get('Retry-After');
+  if (!header) return null;
+  const seconds = Number(header);
+  return isNaN(seconds) ? null : seconds * 1000;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// ── Non-streaming completion ───────────────────────────────────────────────
+
 export async function chatCompletion(
   config: AIConfig,
   options: ChatCompletionOptions,
@@ -85,28 +119,56 @@ export async function chatCompletion(
 
   const baseUrl = config.baseUrl || getProviderConfig(config.provider).baseUrl;
   const model = config.model || getProviderConfig(config.provider).model;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
 
   try {
-    const response = await fetch(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.apiKey}` },
-      body: JSON.stringify(buildBody(options, model)),
-    });
+    let response: Response | null = null;
+    let lastError = '';
 
-    if (!response.ok) {
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      if (attempt > 0) {
+        const delay = RETRYABLE_STATUS.has(response?.status ?? 0)
+          ? (getRetryAfterMs(response!) ?? 2 ** attempt * 1000)
+          : 2 ** attempt * 1000;
+        await sleep(delay);
+      }
+
+      response = await fetch(`${baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.apiKey}` },
+        body: JSON.stringify(buildBody(options, model)),
+        signal: controller.signal,
+      });
+
+      if (response.ok) break;
+
       const errorData = await response.json().catch(() => ({}));
-      return { content: '', error: errorData.error?.message || `API error: ${response.status}` };
+      lastError = errorData.error?.message || `API error: ${response.status}`;
+
+      if (!RETRYABLE_STATUS.has(response.status)) break;
     }
 
-    const data = await response.json();
+    clearTimeout(timeoutId);
+
+    if (!response!.ok) {
+      return { content: '', error: lastError };
+    }
+
+    const data = await response!.json();
     const message = data.choices?.[0]?.message;
     return { content: message?.content || '', tool_calls: message?.tool_calls || undefined };
   } catch (error) {
+    clearTimeout(timeoutId);
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      return { content: '', error: '请求超时或已取消' };
+    }
     return { content: '', error: error instanceof Error ? error.message : 'Unknown error' };
   }
 }
 
-/** Streaming completion - yields chunks as they arrive via SSE */
+// ── Streaming completion ───────────────────────────────────────────────────
+
 export async function* chatCompletionStream(
   config: AIConfig,
   options: ChatCompletionOptions,
@@ -119,20 +181,43 @@ export async function* chatCompletionStream(
   const baseUrl = config.baseUrl || getProviderConfig(config.provider).baseUrl;
   const model = config.model || getProviderConfig(config.provider).model;
 
-  try {
-    const response = await fetch(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.apiKey}` },
-      body: JSON.stringify({ ...buildBody(options, model), stream: true }),
-    });
+  // Create and register abort controller
+  activeController = new AbortController();
+  const timeoutId = setTimeout(() => activeController?.abort(), DEFAULT_TIMEOUT_MS);
 
-    if (!response.ok) {
+  try {
+    let response: Response | null = null;
+    let lastError = '';
+
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      if (attempt > 0) {
+        const delay = RETRYABLE_STATUS.has(response?.status ?? 0)
+          ? (getRetryAfterMs(response!) ?? 2 ** attempt * 1000)
+          : 2 ** attempt * 1000;
+        await sleep(delay);
+      }
+
+      response = await fetch(`${baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.apiKey}` },
+        body: JSON.stringify({ ...buildBody(options, model), stream: true }),
+        signal: activeController.signal,
+      });
+
+      if (response.ok) break;
+
       const errorData = await response.json().catch(() => ({}));
-      yield { type: 'error', error: errorData.error?.message || `API error: ${response.status}` };
+      lastError = errorData.error?.message || `API error: ${response.status}`;
+
+      if (!RETRYABLE_STATUS.has(response.status)) break;
+    }
+
+    if (!response!.ok) {
+      yield { type: 'error', error: lastError };
       return;
     }
 
-    const reader = response.body?.getReader();
+    const reader = response!.body?.getReader();
     if (!reader) {
       yield { type: 'error', error: 'No response body' };
       return;
@@ -140,10 +225,14 @@ export async function* chatCompletionStream(
 
     const decoder = new TextDecoder();
     let buffer = '';
-    // Accumulate tool calls across chunks
-    const toolCallsMap: Map<number, { id: string; type: 'function'; function: { name: string; arguments: string } }> = new Map();
+    const toolCallsMap: Map<number, { id?: string; type: 'function'; function: { name: string; arguments: string } }> = new Map();
 
     while (true) {
+      if (activeController.signal.aborted) {
+        yield { type: 'error', error: '请求已取消' };
+        return;
+      }
+
       const { done, value } = await reader.read();
       if (done) break;
 
@@ -153,12 +242,15 @@ export async function* chatCompletionStream(
 
       for (const line of lines) {
         const trimmed = line.trim();
-        if (!trimmed || !trimmed.startsWith('data: ')) continue;
-        const data = trimmed.slice(6);
+        if (!trimmed) continue;
+
+        // Handle both "data: [DONE]" and "data:[DONE]" formats
+        if (!trimmed.startsWith('data:')) continue;
+        const data = trimmed.startsWith('data: ') ? trimmed.slice(6) : trimmed.slice(5);
+
         if (data === '[DONE]') {
-          // Yield accumulated tool calls if any
           if (toolCallsMap.size > 0) {
-            yield { type: 'tool_calls', tool_calls: Array.from(toolCallsMap.values()) };
+            yield { type: 'tool_calls', tool_calls: Array.from(toolCallsMap.values()) as ToolCall[] };
           }
           yield { type: 'done' };
           return;
@@ -169,17 +261,15 @@ export async function* chatCompletionStream(
           const delta = parsed.choices?.[0]?.delta;
           if (!delta) continue;
 
-          // Content chunks
           if (delta.content) {
             yield { type: 'content', content: delta.content };
           }
 
-          // Tool call chunks (streamed incrementally)
           if (delta.tool_calls) {
             for (const tc of delta.tool_calls) {
               const idx = tc.index ?? 0;
               if (!toolCallsMap.has(idx)) {
-                toolCallsMap.set(idx, { id: tc.id || '', type: 'function', function: { name: '', arguments: '' } });
+                toolCallsMap.set(idx, { type: 'function', function: { name: '', arguments: '' } });
               }
               const existing = toolCallsMap.get(idx)!;
               if (tc.id) existing.id = tc.id;
@@ -193,12 +283,19 @@ export async function* chatCompletionStream(
       }
     }
 
-    // If we got here without [DONE], yield any accumulated tool calls
+    // Stream ended without [DONE]
     if (toolCallsMap.size > 0) {
-      yield { type: 'tool_calls', tool_calls: Array.from(toolCallsMap.values()) };
+      yield { type: 'tool_calls', tool_calls: Array.from(toolCallsMap.values()) as ToolCall[] };
     }
     yield { type: 'done' };
   } catch (error) {
-    yield { type: 'error', error: error instanceof Error ? error.message : 'Unknown error' };
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      yield { type: 'error', error: '请求超时或已取消' };
+    } else {
+      yield { type: 'error', error: error instanceof Error ? error.message : 'Unknown error' };
+    }
+  } finally {
+    clearTimeout(timeoutId);
+    activeController = null;
   }
 }

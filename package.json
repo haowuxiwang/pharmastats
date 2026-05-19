@@ -72,6 +72,11 @@
       ],
       "icon": "resources/icon.ico"
     },
+    "asarUnpack": [
+      "dist/pyodide/*.wasm",
+      "dist/pyodide/*.whl",
+      "dist/pyodide/python_stdlib.zip"
+    ],
     "portable": {
       "artifactName": "PharmaStats-${version}-win-x64-portable.exe"
     }

@@ -135,28 +135,35 @@ export function getToolExecutors(): ToolExecutor[] {
     {
       name: 'descriptive_stats',
       execute: async (args, data) => {
-        const values = extractValues(data, args.column as string);
+        const { values, error } = extractValues(data, args.column as string);
+        if (error) return { error };
         return ipc.analyze('descriptive', { values });
       },
     },
     {
       name: 'normality_test',
       execute: async (args, data) => {
-        const values = extractValues(data, args.column as string);
+        const { values, error } = extractValues(data, args.column as string);
+        if (error) return { error };
         return ipc.analyze('normality', { values });
       },
     },
     {
       name: 'detect_outliers',
       execute: async (args, data) => {
-        const values = extractValues(data, args.column as string);
+        const { values, error } = extractValues(data, args.column as string);
+        if (error) return { error };
         return ipc.analyze('outlier', { values });
       },
     },
     {
       name: 'process_capability',
       execute: async (args, data) => {
-        const values = extractValues(data, args.column as string);
+        const { values, error } = extractValues(data, args.column as string);
+        if (error) return { error };
+        if (args.usl === undefined && args.lsl === undefined) {
+          return { error: 'At least one specification limit (usl or lsl) is required' };
+        }
         return ipc.analyze('capability', {
           values,
           usl: args.usl,
@@ -168,7 +175,8 @@ export function getToolExecutors(): ToolExecutor[] {
     {
       name: 'control_chart',
       execute: async (args, data) => {
-        const values = extractValues(data, args.column as string);
+        const { values, error } = extractValues(data, args.column as string);
+        if (error) return { error };
         return ipc.analyze('control_chart', {
           values,
           chart_type: args.chart_type || 'xbar_r',
@@ -178,14 +186,28 @@ export function getToolExecutors(): ToolExecutor[] {
     {
       name: 'trend_analysis',
       execute: async (args, data) => {
-        const values = extractValues(data, args.column as string);
+        const { values, error } = extractValues(data, args.column as string);
+        if (error) return { error };
         return ipc.analyze('trend', { values });
       },
     },
   ];
 }
 
-function extractValues(data: ParsedData, column: string): number[] {
+function extractValues(data: ParsedData, column: string): { values: number[]; error?: string } {
+  if (!column || typeof column !== 'string') {
+    return { values: [], error: 'Missing or invalid column name' };
+  }
+  if (!(column in data.data)) {
+    return {
+      values: [],
+      error: `Column "${column}" not found. Available columns: ${data.columns.join(', ')}`,
+    };
+  }
   const raw = data.data[column] ?? [];
-  return raw.filter((v): v is number => typeof v === 'number' && !isNaN(v));
+  const values = raw.filter((v): v is number => typeof v === 'number' && !isNaN(v));
+  if (values.length === 0) {
+    return { values: [], error: `Column "${column}" has no numeric data` };
+  }
+  return { values };
 }

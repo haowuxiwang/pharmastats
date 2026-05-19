@@ -62,5 +62,5 @@ export const useChatStore = create<ChatState>((set) => ({
   setOpen: (open) => set({ isOpen: open }),
   toggleOpen: () => set((s) => ({ isOpen: !s.isOpen })),
   setStreaming: (streaming) => set({ isStreaming: streaming }),
-  clearMessages: () => set({ messages: [] }),
+  clearMessages: () => set({ messages: [], isStreaming: false }),
 }));

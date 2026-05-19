@@ -26,6 +26,18 @@ function createWindow() {
     mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
   }
 
+  // Crash recovery: reload renderer if it crashes or becomes unresponsive
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    console.error('Renderer process gone:', details.reason);
+    if (mainWindow) {
+      mainWindow.reload();
+    }
+  });
+
+  mainWindow.on('unresponsive', () => {
+    console.warn('Window became unresponsive');
+  });
+
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
@@ -34,7 +46,10 @@ function createWindow() {
 function setupIPC() {
   // File dialog
   ipcMain.handle('dialog:openFile', async (_, options) => {
-    const result = await dialog.showOpenDialog(mainWindow!, {
+    if (!mainWindow) {
+      return [];
+    }
+    const result = await dialog.showOpenDialog(mainWindow, {
       properties: ['openFile', 'multiSelectionAllowed'],
       filters: [
         { name: 'Data Files', extensions: ['xlsx', 'xls', 'csv', 'pdf'] },
