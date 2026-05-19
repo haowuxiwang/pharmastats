@@ -4,6 +4,9 @@
  */
 
 import type { AIConfig } from '../../types';
+import { createLogger } from '../logger';
+
+const log = createLogger('AIClient');
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
@@ -122,12 +125,15 @@ export async function chatCompletion(
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
 
+  log.debug(`chatCompletion: ${model} @ ${baseUrl}`);
+
   try {
     let response: Response | null = null;
     let lastError = '';
 
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
       if (attempt > 0) {
+        log.warn(`Retry attempt ${attempt}/${MAX_RETRIES}`);
         const delay = RETRYABLE_STATUS.has(response?.status ?? 0)
           ? (getRetryAfterMs(response!) ?? 2 ** attempt * 1000)
           : 2 ** attempt * 1000;
@@ -180,6 +186,8 @@ export async function* chatCompletionStream(
 
   const baseUrl = config.baseUrl || getProviderConfig(config.provider).baseUrl;
   const model = config.model || getProviderConfig(config.provider).model;
+
+  log.debug(`chatCompletionStream: ${model} @ ${baseUrl}`);
 
   // Create and register abort controller
   activeController = new AbortController();

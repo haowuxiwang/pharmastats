@@ -10,6 +10,9 @@ import {
 } from './client';
 import type { AIConfig, ParsedData } from '../../types';
 import type { ToolExecutor } from './tools';
+import { createLogger } from '../logger';
+
+const log = createLogger('Agent');
 
 export interface AgentConfig {
   aiConfig: AIConfig;
@@ -59,7 +62,10 @@ export async function* runAgent(
     { role: 'user', content: userMessage },
   ];
 
+  log.info(`Agent started: maxIterations=${maxIterations}, tools=${tools.map(t => t.function.name).join(', ')}`);
+
   for (let iteration = 0; iteration < maxIterations; iteration++) {
+    log.debug(`Iteration ${iteration + 1}/${maxIterations}`);
     let fullContent = '';
     let toolCalls: ToolCall[] | undefined;
 
@@ -80,9 +86,12 @@ export async function* runAgent(
 
     // If no tool calls, we're done
     if (!toolCalls || toolCalls.length === 0) {
+      log.info('Agent completed: no tool calls');
       yield { type: 'done' };
       return;
     }
+
+    log.info(`Tool calls requested: ${toolCalls.map(tc => tc.function?.name).join(', ')}`);
 
     // Execute tool calls
     // First, add the assistant message with tool_calls to messages
@@ -113,6 +122,7 @@ export async function* runAgent(
 
       let resultStr: string;
       if (executor) {
+        const start = Date.now();
         try {
           const parsed = JSON.parse(tc.function.arguments);
           const args = typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
@@ -120,13 +130,16 @@ export async function* runAgent(
             : {};
           const result = await executor.execute(args, data);
           resultStr = JSON.stringify(result, null, 2);
+          log.debug(`Tool ${toolName} completed in ${Date.now() - start}ms`);
         } catch (err) {
           resultStr = JSON.stringify({
             error: err instanceof Error ? err.message : String(err),
           });
+          log.error(`Tool ${toolName} failed after ${Date.now() - start}ms:`, err);
         }
       } else {
         resultStr = JSON.stringify({ error: `Unknown tool: ${toolName}` });
+        log.warn(`Unknown tool requested: ${toolName}`);
       }
 
       yield {
@@ -146,5 +159,6 @@ export async function* runAgent(
     // Continue the loop - the LLM will process tool results
   }
 
+  log.warn(`Agent hit max iterations (${maxIterations})`);
   yield { type: 'error', error: `达到最大迭代次数 (${maxIterations})` };
 }

@@ -4,6 +4,10 @@
  */
 
 import { loadPyodide, type PyodideInterface } from 'pyodide';
+import { createLogger } from '../logger';
+
+const log = createLogger('Pyodide');
+const LOAD_TIMEOUT_MS = 30_000;
 
 let pyodide: PyodideInterface | null = null;
 let initPromise: Promise<PyodideInterface> | null = null;
@@ -43,32 +47,40 @@ export async function initPyodide(): Promise<PyodideInterface> {
   if (initPromise) return initPromise;
 
   initPromise = (async () => {
+    const timeout = setTimeout(() => {
+      emit({ loading: false, error: 'Pyodide 加载超时（30秒），请检查网络或刷新重试', step: '' });
+      initPromise = null;
+    }, LOAD_TIMEOUT_MS);
+
     try {
+      log.info('Initializing Pyodide WASM...');
       emit({ loading: true, error: null, step: 'Loading Pyodide WASM...' });
 
-      // indexURL points to the directory containing .wasm + .js files.
-      // Works for both Vite dev server (http://localhost:5173/pyodide/)
-      // and Electron production (file://...dist/pyodide/).
       const indexURL = new URL('./pyodide/', window.location.href).href;
+      log.debug(`indexURL: ${indexURL}`);
 
       const py = await loadPyodide({
         indexURL,
-        packageBaseUrl: indexURL,  // load .whl packages from local files, not CDN
+        packageBaseUrl: indexURL,
       });
+      log.debug('Pyodide core loaded');
       emit({ step: 'Installing numpy...' });
 
-      // numpy is bundled with Pyodide; scipy and pandas need explicit load.
       await py.loadPackage(['numpy', 'scipy', 'pandas']);
+      log.debug('Packages installed');
       emit({ step: 'Importing scipy...' });
 
-      // Verify imports work
       await py.runPythonAsync('import numpy, scipy, pandas');
+      log.info('Pyodide ready');
 
+      clearTimeout(timeout);
       pyodide = py;
       emit({ ready: true, loading: false, step: '' });
       return py;
     } catch (err) {
+      clearTimeout(timeout);
       const msg = err instanceof Error ? err.message : String(err);
+      log.error('Pyodide init failed:', msg);
       emit({ loading: false, error: msg, step: '' });
       initPromise = null;
       throw err;
